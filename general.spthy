@@ -1,0 +1,165 @@
+theory general
+
+begin
+
+builtins: signing, asymmetric-encryption, symmetric-encryption
+
+/*
+rule Register_Keypair:
+  [ Fr(~key) ]
+--[ Once($A), Prelim()]->
+  [ !Pk($A, pk(~key)), !Ltk($A, ~key), Out( pk(~key) ), !Agent($A) ]
+*/
+
+/*
+rule Corrupt_Agent:
+  [ !Ltk($A, ltk) ]
+--[ Corrupt($A), Prelim() ]->
+  [ Out(ltk), !CorruptAgent($A) ]
+*/
+
+// OnlyOneInit()
+
+
+rule Init_Factory_Certificate:
+  [Fr(~fact_cert)]
+--[OnlyOneInit($dev_A)]->
+  [!Pk($dev_A, pk(~fact_cert)), !Ltk($dev_A, ~fact_cert), Out( pk(~fact_cert) ), !Device($dev_A), !FactCert($dev_A,pk(~fact_cert)) ]
+
+rule Init_CA:
+  [Fr(~sk_CA)]
+--[OnlyOneInit($CA)]->
+  [!Pk($CA, pk(~sk_CA)), !Ltk($CA, ~sk_CA), Out( pk(~sk_CA) ), !CA($CA)]
+
+rule Init_Service:
+  [Fr(~sk_serv)]
+--[OnlyOneInit($serv)]->
+  [!Pk($serv, pk(~sk_serv)), !Ltk($serv, ~sk_serv), Out( pk(~sk_serv) ), !Service($serv)]
+  
+
+
+// Use factory certificate as an asymetric key to share a symetric key
+
+rule Establish_Session_Request:  // EDHOC
+  let req = aenc(~candidate_key, pk(sk_V))
+      m_out = < req, sign( req, sk_U ) >
+  in
+  [Fr(~candidate_key), !Ltk($U, sk_U), !Pk($V, pk(sk_V)), Want_to_establish_session($U,$V, pk(sk_V)) ]
+--[SecureSessionForming($U, $V, sk_V, ~candidate_key), Secret(~candidate_key)]->
+  [Out(m_out), RequestedSession($U, pk(sk_U), $V, pk(sk_V), ~candidate_key)]
+
+rule Establish_Session_Reply:  // EDHOC
+  let req = aenc(candidate_key, pk(sk_V))
+      m_in = < req, sign( req, sk_U ) >
+     //req = verify( sign(aenc(candidate_key, pk(sk)), sk_U) aenc(candidate_key, pk(sk))     aenc(candidate_key, pk(sk))
+     // candidate_key = adec(req, sk)
+  in
+  [In(req), !Ltk($V, sk_V), !Pk($U, pk(sk_U)), RequestedSession($U, pk(sk_U), $V, pk_V, candidate_key)]
+--[SecureSessionFormed($U, $V, candidate_key), Secret(candidate_key)]->
+  [!Shared_Key($U, pk(sk_U), $V, pk_V, candidate_key)]
+
+
+
+
+rule Certificate_Enrollment_Request_Over_Secure_Session:  // EST-OSCORE
+  let candidate_cert = pk(~new_secret)
+      m = senc(candidate_cert, shared_key)
+  in
+  [Fr(~new_secret), !Device($device), !CA($CA), !Shared_Key($device, pk_dev, $CA, pk_CA, shared_key)]
+--[EnrollmentBegins($device,$CA,~new_secret)]->
+  [Device_Try_to_Enroll($device, ~new_secret, $CA, pk_CA, shared_key), Out(m)]
+
+
+rule Certificate_Enrollment_Reply:  // 
+  let m = senc(candidate_cert, shared_key)
+     // candidate_cert = sdec(m, shared_key)
+      new_cert = sign(candidate_cert, sk_CA)
+      //m_out = senc(new_cert, shared_key)
+      m_out = new_cert
+  in 
+  [In(m), !Shared_Key($device, pk_dev, $CA, pk(sk_CA), shared_key), !CA($CA), !Ltk($CA, sk_CA)]
+--[EnrollmentContinues($device, $CA, shared_key)]->
+  [!Pk($device, new_cert), Out(m_out)]
+
+rule Certificate_Enrollment_Confirm:
+  let candidate_cert = pk(new_secret)
+      new_cert = sign(candidate_cert, sk_CA)
+     // m_in = senc(new_cert, shared_key)
+      m_in = new_cert
+  in 
+  [In(m_in), Device_Try_to_Enroll($device, new_secret, $CA, pk(sk_CA),shared_key), !Pk($CA, pk(sk_CA)) ]
+--[EnrollmentFinished($device, $CA, new_secret)]->
+  [!Ltk($device, new_secret), !Cert($device, new_cert)]
+
+
+
+
+rule Establish_Session_With_CA:  //  EDHOC
+  [!Device($dev), !CA($CA), !Pk($CA, pk_CA)]
+--[DeviceBeginsToEstablishSessionWithCA($dev,$CA, pk_CA)]->
+  [Want_to_establish_session($dev,$CA, pk_CA)]
+
+
+
+rule Establish_Session_With_Service:  //  EDHOC
+  [!Device($dev), !Service($serv), !Cert($dev, new_cert), !Pk($serv, pk_serv) ]
+--[DeviceBeginsToEstablishSessionWithService($dev,$serv,new_cert)]->
+  [Want_to_establish_session($dev,$serv,pk_serv)]
+
+
+rule Use_Service:   // OSCORE
+  [!Device($dev), !Service($serv), !Shared_Key($dev, pk_dev, $serv, pk_serv, shared_key)]
+--[Success($dev, $serv)]->
+  []
+
+
+
+
+restriction OnlyOneInit:
+  "
+  All #i #j x. OnlyOneInit(x)@#i & OnlyOneInit(x)@#j ==> #i = #j
+  "
+
+
+// -------------------- Sanity Check Lemmas -------------------- //
+
+lemma end_exist:
+  exists-trace
+  "
+    Ex D S #t. (Success(D, S)@t)
+    //&
+    //Ex D S c #t. (DeviceBeginsToEstablishSessionWithService(D,S,c)@t)
+  "
+
+
+
+// -------------------- Security Lemmas -------------------- //
+
+
+lemma secrecy:
+  "All x #i. 
+    Secret(x) @i ==> 
+    not (Ex #j. K(x)@j)
+        | (Ex B #r. Reveal(B)@r & Honest(B) @i)"
+
+/*
+lemma secrecy_PFS:
+  "All x #i. 
+    Secret(x) @i ==> 
+    not (Ex #j. K(x)@j)
+        | (Ex B #r. Reveal(B)@r & Honest(B) @i & r < i)"
+*/
+
+// No replay attack
+lemma injectiveagreement:
+  "All A B t #i. 
+    Commit(A,B,t) @i
+    ==> (Ex #j. Running(B,A,t) @j 
+        & j < i
+        & not (Ex A2 B2 #i2. Commit(A2,B2,t) @i2
+                           & not (#i2 = #i)))
+              | (Ex C #r. Reveal(C)@r & Honest(C) @i)"
+
+
+end
+
